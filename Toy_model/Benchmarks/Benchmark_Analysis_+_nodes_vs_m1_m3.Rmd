@@ -1,0 +1,183 @@
+---
+title: "Benchmark Models"
+author: "Romuald H"
+date: "Décembre 2024"
+output:
+  bookdown::html_document2:
+    fig_caption: yes
+    number_sections: yes
+    toc: no
+  bookdown::pdf_document2:
+    fig_caption: yes
+    toc: no
+    latex_engine: xelatex
+  bookdown::word_document2:
+    fig_caption: yes
+    number_sections: yes
+    toc: no
+linestretch: 1.5
+site: bookdown::bookdown_site
+language: fr-FR
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+  comment=NA, echo = FALSE,  cache=TRUE, message=FALSE, 
+  warning=FALSE, error=FALSE, cache.lazy=FALSE
+  )
+library(dplyr)
+```
+# Model Comparison
+
+```{r Scorff run model,fig.cap="", out.width="90%",echo=TRUE}
+#This RMarkdown script compares two models based on **Algorithmic Efficiency**, **Computational Efficiency**, the #time spent on a specified node, and **WAIC metrics**.
+```
+
+## Define File Paths -----------------------------------------------------
+
+```{r file-paths}
+model1_files <- list(
+  Computational_Efficiency = "~/Scorff LCM/Scorff LCM/Scorff LCM/outputs_hindcast/Computational_efficiency.rds",
+  Computational_Efficiency_tot = "~/Scorff LCM/Scorff LCM/Scorff LCM/outputs_hindcast/Computational_efficiency_tot.rds",
+  Algorithmic_Efficiency = "~/Scorff LCM/Scorff LCM/Scorff LCM/outputs_hindcast/Algorithmic_efficiency.rds",
+  Sampler_Results = "~/Scorff LCM/Scorff LCM/Scorff LCM/outputs_hindcast/sampler_results.rds",
+  WAIC = "~/Scorff LCM/Scorff LCM/Scorff LCM/outputs_hindcast/wAIC_base_model.rds"
+)
+
+model2_files <- list(
+  Computational_Efficiency = "~/Scorff LCM_with_nuts_&change_number_iterations/Scorff LCM_with_nuts/Scorff LCM/outputs_hindcast/Computational_efficiency.rds",
+  Computational_Efficiency_tot = "~/Scorff LCM_with_nuts_&change_number_iterations/Scorff LCM_with_nuts/Scorff LCM/outputs_hindcast/Computational_efficiency_tot.rds",
+  Algorithmic_Efficiency = "~/Scorff LCM_with_nuts_&change_number_iterations/Scorff LCM_with_nuts/Scorff LCM/outputs_hindcast/Algorithmic_efficiency.rds",
+  Sampler_Results = "~/Scorff LCM_with_nuts_&change_number_iterations/Scorff LCM_with_nuts/Scorff LCM/outputs_hindcast/sampler_results.rds",
+  WAIC = "~/Scorff LCM_with_nuts_&change_number_iterations/Scorff LCM_with_nuts/Scorff LCM/outputs_hindcast/wAIC_base_model.rds"
+)
+```
+## Specify Node to Analyze
+
+```{r node-setup}
+nodes_to_analyze <- c("alpha")  # Specify one or more nodes
+```
+## Load Model Data -------------------------------------
+```{r load-data}
+load_model_data <- function(files) {
+  list(
+    Computational_Efficiency = readRDS(files$Computational_Efficiency),
+    Computational_Efficiency_tot = readRDS(files$Computational_Efficiency_tot),
+    Algorithmic_Efficiency = readRDS(files$Algorithmic_Efficiency),
+    Sampler_Results = readRDS(files$Sampler_Results),
+    WAIC = readRDS(files$WAIC)$WAIC
+  )
+}
+
+model1_data <- load_model_data(model1_files)
+model2_data <- load_model_data(model2_files)
+```
+## Extract Node-Specific Time  ----------------------------------------
+```{r node-time}
+get_node_time <- function(sampler_results, nodes) {
+  sampler_results %>%
+    filter(SamplerNodesFiltered %in% nodes) %>%
+    summarize(Total_Time = sum(SamplerTimes)) %>%
+    pull(Total_Time)
+}
+
+model1_data$Sampler_Time_Node <- get_node_time(model1_data$Sampler_Results, nodes_to_analyze)
+model2_data$Sampler_Time_Node <- get_node_time(model2_data$Sampler_Results, nodes_to_analyze)
+```
+
+## Summarize Results -------------------------------------
+
+```{r summary}
+summary <- data.frame(
+  Model = c("Model 1", "Model 2"),
+  Algorithmic_Efficiency_Node = c(
+    mean(model1_data$Algorithmic_Efficiency),
+    mean(model2_data$Algorithmic_Efficiency)
+  ),
+  Computational_Efficiency_Node = c(
+    mean(model1_data$Computational_Efficiency),
+    mean(model2_data$Computational_Efficiency)
+  ),
+  Computational_Efficiency_Tot_Model = c(
+    mean(model1_data$Computational_Efficiency_tot),
+    mean(model2_data$Computational_Efficiency_tot)
+  ),
+  Sampler_Time_Node = c(
+    mean(model1_data$Sampler_Time_Node),
+    mean(model2_data$Sampler_Time_Node)
+  ),
+  WAIC_Model = c(
+    mean(model1_data$WAIC),
+    mean(model2_data$WAIC)
+  )
+)
+
+
+print("Summary of Model Metrics:")
+print(summary)
+```
+## Compute Relative Gains
+```{r gains}
+gain_relative_AE_Node <- (summary$Algorithmic_Efficiency_Node[2] - summary$Algorithmic_Efficiency_Node[1]) /
+  summary$Algorithmic_Efficiency_Node[1]
+gain_relative_CE_Node <- (summary$Computational_Efficiency_Node[2] - summary$Computational_Efficiency_Node[1]) /
+  summary$Computational_Efficiency_Node[1]
+gain_relative_CE_tot_Model <- (summary$Computational_Efficiency_Tot_Model[2] - summary$Computational_Efficiency_Tot_Model[1]) /
+  summary$Computational_Efficiency_Tot_Model[1]
+surcout_temps_node <- (summary$Sampler_Time_Node[2] - summary$Sampler_Time_Node[1]) /
+  summary$Sampler_Time_Node[1]
+
+gain_relative_waic_Model <- (summary$WAIC_Model[2] - summary$WAIC_Model[1]) / summary$WAIC_Model[1]
+
+print(paste("Relative Gain in Algorithmic Efficiency (Node):", round(gain_relative_AE_Node * 100, 2), "%"))
+print(paste("Relative Gain in Computational Efficiency (Node):", round(gain_relative_CE_Node * 100, 2), "%"))
+print(paste("Relative Gain in Total Computational Efficiency (Model):", round(gain_relative_CE_tot_Model * 100, 2), "%"))
+print(paste("Relative Overhead in Computational Time for nodes", paste(nodes_to_analyze, collapse = ", "), ":", round(surcout_temps_node * 100, 2), "%"))
+print(paste("Relative Gain in WAIC (lower is better):", round(gain_relative_waic_Model * 100, 2), "%"))
+```
+
+## Decision -------------------------------------
+```{r decision}
+if (gain_relative_AE_Node > 0) {
+  print("Model 2 is better in terms of algorithmic efficiency at the node level.")
+} else {
+  print("Model 1 is better in terms of algorithmic efficiency at the node level.")
+}
+
+if (gain_relative_CE_Node < 0) {
+  print("Model 2 is better in terms of computational efficiency at the node level.")
+} else {
+  print("Model 1 is better in terms of computational efficiency at the node level.")
+}
+
+if (gain_relative_CE_tot_Model < 0) {
+  print("Model 2 is better in terms of total computational efficiency.")
+} else {
+  print("Model 1 is better in terms of total computational efficiency.")
+}
+
+if (gain_relative_waic_Model < 0) {
+  print("Model 1 has a better WAIC score (lower is better).")
+} else {
+  print("Model 2 has a better WAIC score (lower is better).")
+}
+```
+
+## Summary Table -------------------------------------
+```{r summary-table}
+library(kableExtra)
+summary_table <- summary %>% 
+  mutate(
+    Relative_AE_Gain_Node = c(NA, round(gain_relative_AE_Node * 100, 2)),
+    Relative_CE_Gain_Node = c(NA, round(gain_relative_CE_Node * 100, 2)),
+    Relative_CE_Tot_Gain_Model = c(NA, round(gain_relative_CE_tot_Model * 100, 2)),
+    Relative_WAIC_Gain_Model = c(NA, round(gain_relative_waic_Model * 100, 2))
+  )
+
+kable(summary_table, format = "html", caption = "Synoptic Table of Model Metrics") %>% 
+  kable_styling(full_width = FALSE, position = "center")
+```

@@ -1,0 +1,872 @@
+---
+title: "Optimization Steps Process_STEPS2"
+author: "Romuald H"
+date: "Décembre 2024"
+output:
+  bookdown::html_document2:
+    fig_caption: yes
+    number_sections: yes
+    toc: no
+  bookdown::pdf_document2:
+    fig_caption: yes
+    toc: no
+    latex_engine: xelatex  # Utiliser xelatex pour gérer Unicode
+  bookdown::word_document2:
+    fig_caption: yes
+    number_sections: yes
+    toc: no
+linestretch: 1.5
+site: bookdown::bookdown_site
+language: fr-FR
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(coda)
+library(ggrepel)
+library(ggplot2)
+library(magick)
+library(MASS)  # Pour kde2d
+knitr::opts_chunk$set(
+  comment=NA, echo = FALSE,  cache=TRUE, message=FALSE, 
+  warning=FALSE, error=FALSE, cache.lazy=FALSE
+  )
+
+```
+# Model Scorff to run
+```{r Scorff run model,fig.cap="", out.width="90%",echo=TRUE}
+
+source("Rscript/0_load_library.R")
+source("Rscript/0_load_functions.R")
+
+run_traceplot <- FALSE
+run_WAIC <- TRUE
+model_name <- "base_model"
+
+modelfile <- "model/model_scorff_LCM_v1.R"
+datafile <- "input_data/data_scorff_LCM_v2.rds"
+Constfile <- "input_data/Const_scorff_LCM_v2.rds"
+configfile <- "Rscript/1_configuration_base.R"
+initfile <- "Rscript/0_generate_inits_base.R"
+Data_nimble <- readRDS(datafile)
+Const_nimble <- readRDS(Constfile)
+ESS_threshold <-1000 #For time to be reach to ESS =1000
+n.iter <- 500e3 # total number of model iterations 
+n.burnin  <- 0 # burnin define in total number of model iteration
+n.chains  <- 3 # number of parallel chains
+n.thin  <- 250 # thin applied to keep a reasonable number of posteriors
+
+burnin_output <- 200 # burnin defined relative to number of posterior used in outputs only
+calculate_N <- function(n.iter, n.burnin, n.chains, n.thin) {
+  N <- n.chains * floor((n.iter - n.burnin) / n.thin)
+  return(N)
+}
+
+N <- calculate_N(n.iter, n.burnin, n.chains, n.thin)
+print(N) #Total number of posterior samples ie the number of iterations actually used for inference
+np <-1 # or 0.6/0.4/0.2/0.1 Proportion of nodes to display
+# Should chains be run in parallel
+parallel_run <- TRUE
+
+# Create log file -----------------------------------------------------
+if (!dir.exists("log")) {
+  dir.create("log")
+}
+
+# Names files to store results ----------------------------------------
+
+
+# 1 - Configuration & Model compilation -------------------------------
+source(configfile)
+##Check that all possible nodes are monitored before continuing.##
+# 2 - Run Model -------------------------------------------------------
+# Model will not be run if name_file_mcmc exists
+source("Rscript/2_run_model.R")
+
+
+# 3 - Convergence Analysis & plot--------------------------------------
+source("Rscript/3_convergence.R")
+
+# 4 - extract median & plot parameters  -------------------------------
+source("Rscript/4_parameters_summary_and_plot.R")
+
+# 5 - Fit assessment  -------------------------------------------------
+source("Rscript/5_fit_assessment.R")
+
+# 6 - WAIC ------------------------------------------------------------
+if(run_WAIC){
+  source("Rscript/6_WAIC.R")
+}
+
+# 7 - Traceplot -------------------------------------------------------
+if(run_traceplot){
+  source("Rscript/7_traceplot.R")
+}
+```
+
+# Check the convergence(Gelman−Rubin Rhat, neff) of model parameters -----------------------------------------------------
+
+```{r First verification-include-pdfs,fig.cap="", out.width="90%",echo=TRUE, results='asis'}
+# Directory for saving images extracted from pdfs
+output_dir <- "output_images"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Browse each PDF file
+pdf_dir <- "~/Optimization_process/Toy_model/Scorff LCM_model2/Figures/Convergence"
+pdf_files <- list.files(pdf_dir, pattern = "\\.pdf$", full.names = TRUE)
+
+for (pdf in pdf_files) {
+  # Charger toutes les pages du PDF
+  img_list <- image_read(pdf)
+  
+  # Parcourir chaque page
+  for (i in seq_along(img_list)) {
+    # Sauvegarder chaque page dans un fichier PNG
+    img_path <- file.path(output_dir, paste0(basename(pdf), "_page", i, ".png"))
+    image_write(img_list[i], path = img_path, format = "png")
+  }
+}
+
+# Image directory
+output_dir <- "output_images"
+png_files <- list.files(output_dir, pattern = "\\.png$", full.names = TRUE)
+
+# Include all images in the document
+knitr::include_graphics(png_files)
+
+##Once convergence has been verified, continue the analysis, otherwise resume running the model after making adjustments...
+```
+# List the target nodes for each sampler -------------------------------------
+"The nodes assigned to the samplers are the ones that can improve the model, so they're the ones we're most interested in"
+```{r Sampler nodes,fig.cap="", out.width="90%",echo=FALSE,results='hide'}
+samplers <- conf.mcmc.model$getSamplers()
+lapply(samplers, function(sampler) {
+  list(
+    Type = class(sampler),
+    TargetNodes = sampler$target  # Nodes associated with this sampler
+  )
+})
+#print(samplers)
+
+n.samplers <-length(samplers)  ## Number of nodes with samplers
+prop_worst <- ceiling(n.samplers*np) # Proportion of bottlenecks to be examined
+```
+# Extraction of nodes from samplers-Filtering of ess_values -------------------------------------
+```{r Reduce ess_values only to nodes contained in samplers,fig.cap="", out.width="90%",echo=FALSE}
+# Load sampler times from an RDS file
+sampler_times <- readRDS("~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/sampler_times_base_model_chain1.rds")
+# Load MCMC results and verify the format -----------------------------------
+results <- readRDS("~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/mcmc_results_base_model.rds")
+# Convert MCMC results to a 3D array format for diagnostics -----------------
+if (is.list(results) && length(dim(results[[1]])) == 2) {
+ iterations <- nrow(results[[1]])
+  parameters <- ncol(results[[1]])
+  chains <- length(results)
+  
+   #Create a 3D array (iterations x chains x parameters)
+  mcmc_array <- array(NA, dim = c(iterations, chains, parameters))
+  
+  for (chain in 1:chains) {
+    mcmc_array[, chain, ] <- as.matrix(results[[chain]])
+  }
+  
+  # Assign parameter names to the array dimensions
+  parameter_names <- colnames(results[[1]])
+  dimnames(mcmc_array) <- list(NULL, NULL, parameter_names)
+} else {
+  stop("Error: 'results' is not in the expected format for conversion to an array.")
+}
+
+# Run convergence diagnostics using effectiveSize from the coda package -----
+mcmc_list <- lapply(results, as.mcmc)
+
+# Extract effective sample sizes (ESS) with explicit parameter names --------
+#ess_values <-sapply(mcmc_list, effectiveSize)
+#names(ess_values) <- colnames(mcmc_list[[1]])
+
+
+##2eme option : 
+# Vérifiez que `totdf` contient les colonnes nécessaires
+if (!exists("totdf") || !all(c("fullname", "neff") %in% colnames(totdf))) {
+  stop("Erreur : 'totdf' n'est pas disponible ou ne contient pas les colonnes requises ('fullname', 'neff').")
+}
+
+# Extraire les ESS et les noms des paramètres
+ess_values <- totdf$neff
+names(ess_values) <- totdf$fullname
+
+cat("Effective Sample Sizes (ESS) extraits de totdf :\n")
+print(ess_values)
+
+# Extract unique sampler node names exactly as they are
+sampler_nodes_exact <- unique(unlist(lapply(samplers, function(sampler) {
+  sampler$target
+})))
+
+# Filtrer les ESS pour ne garder que les nœuds présents dans sampler_nodes_exact
+ess_values_filtered <- ess_values[names(ess_values) %in% sampler_nodes_exact]
+
+# Identifier les nœuds manquants dans ESS
+missing_nodes <- setdiff(sampler_nodes_exact, names(ess_values))
+
+# Trier les nœuds pour garantir l'alignement
+sampler_nodes_filtered <- sort(sampler_nodes_exact[!(sampler_nodes_exact %in% missing_nodes)]) # Trier les nœuds filtrés
+ess_values_filtered <- ess_values_filtered[order(names(ess_values_filtered))]                # Trier les ESS par leurs noms
+
+# Réaligner les ESS avec les noms triés
+aligned_ess_values <- ess_values_filtered[match(sampler_nodes_filtered, names(ess_values_filtered))]
+
+# Afficher les résultats corrigés ------------------------------------------
+cat("\nFiltered and Aligned ESS values (aligned_ess_values):\n")
+print(aligned_ess_values)
+
+cat("\nNodes in samplers but missing in ESS:\n")
+if (length(missing_nodes) > 0) {
+  print(missing_nodes)
+} else {
+  cat("None\n")
+}
+
+
+# Combine results into a data frame for saving ------------------------------
+results_df <- data.frame(
+  SamplerNodesFiltered = sampler_nodes_filtered,
+  SamplerTimes = sampler_times,
+  ESSValuesFiltered = unname(ess_values_filtered), # Remove names for consistency
+  stringsAsFactors = FALSE
+)
+
+# Ensure alignment of columns for saving (shorten or fill missing values)
+max_length <- max(length(results_df$SamplerNodesFiltered), 
+                  length(results_df$SamplerTimes), 
+                  length(results_df$ESSValuesFiltered))
+
+results_df <- data.frame(
+  SamplerNodesFiltered = c(results_df$SamplerNodesFiltered, rep(NA, max_length - length(results_df$SamplerNodesFiltered))),
+  SamplerTimes = c(results_df$SamplerTimes, rep(NA, max_length - length(results_df$SamplerTimes))),
+  ESSValuesFiltered = c(results_df$ESSValuesFiltered, rep(NA, max_length - length(results_df$ESSValuesFiltered))),
+  stringsAsFactors = FALSE
+)
+# Save the combined data frame to an RDS file -------------------------------
+saveRDS(results_df, "~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/sampler_results.rds")
+
+# Confirmation message
+cat("Sampler results saved to '~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/sampler_results.rds'.\n")
+
+```
+# Creation of mcmc_lists-Deletion of NAs-Detection  ----------------------------------------
+```{r Second_ verification of model outputs,fig.cap="", out.width="90%",echo=FALSE}
+
+##Functions-##2nd level of filtering
+# Function to identify nodes with NA values ---------------------------------
+identify_nodes_with_na <- function(ess_values_filtered) {
+  # Identify nodes with NA values
+  nodes_with_na <- names(ess_values_filtered)[is.na(ess_values_filtered)]
+  return(nodes_with_na)
+}
+###Always understand why these nodes display NA ESS values before proceeding..
+# Function to clean ESS values ----------------------------------------------
+cleaned_ess_values <- function(ess_values_filtered) {
+  # Step 1: Identify and report nodes with NA
+  nodes_with_na <- identify_nodes_with_na(ess_values_filtered)
+  
+  if (length(nodes_with_na) > 0) {
+    cat("Nodes with NA values detected:\n")
+    print(nodes_with_na)
+    # Investigate why NA values exist: fixed nodes or unnecessary parameters?
+  } else {
+    cat("No nodes with NA values detected.\n")
+  }
+  
+  # Step 2: Remove NA values
+  ess_values_cleaned <- ess_values_filtered[!is.na(ess_values_filtered)]
+  
+  # Step 3: Verify that no NA values remain
+  if (any(is.na(ess_values_cleaned))) {
+    stop("Error: NA values persist after cleaning.")
+  }
+  
+  return(ess_values_cleaned)
+}
+###Not necessary but could be useful
+# Function to remove constant parameters ------------------------------------
+#remove_constant_params <- function(ess_values_cleaned, constant_params) {
+  # Remove parameters considered constant from ESS values
+  #ess_values_filtered <- ess_values_cleaned[!names(ess_values_cleaned) %in% constant_params]
+  #return(ess_values_filtered)
+#}
+
+## Main Workflow -------------------------------------------------------------
+
+# Step 1: Identify nodes with NA values
+cat("Identifying nodes with NA values...\n")
+nodes_with_na <- identify_nodes_with_na(ess_values_filtered)
+print(nodes_with_na)
+
+# Step 2: Clean ESS values by removing NA
+cat("Cleaning ESS values...\n")
+ess_values_cleaned <- cleaned_ess_values(ess_values_filtered)
+
+# Step 3: Report results after cleaning
+cat("Cleaning complete. Remaining values:\n")
+cat("Number of parameters before cleaning:", length(ess_values_filtered), "\n")
+cat("Number of parameters after cleaning:", length(ess_values_cleaned), "\n")
+
+# Step 4: Remove constant parameters (if applicable)
+#cat("Removing constant parameters...\n")
+#ess_values_cleaned2 <- remove_constant_params(ess_values_cleaned, constant_params)
+
+# Step 5: Final verification and display
+cat("Final cleaned ESS values:\n")
+#print(ess_values_cleaned2)
+
+## End of Workflow -----------------------------------------------------------
+
+```
+# Identify and Remove Nodes with Zero ESS -------------------------------------
+
+```{r Identify and Remove Nodes with Zero ESS,fig.cap="", out.width="90%",echo=FALSE}
+# Identify and Remove Nodes with Zero ESS
+# ----------------------------------------
+
+# Check if the `ess_values_filtered` variable exists
+if (exists("ess_values_cleaned")) {
+  
+  # Step 1: Identify nodes with ESS = 0
+  zero_ess_nodes <- names(ess_values_cleaned[ess_values_cleaned == 0])
+  
+  if (length(zero_ess_nodes) > 0) {
+    cat("Nodes with ESS = 0:\n")
+    print(zero_ess_nodes)
+  } else {
+    cat("No nodes with ESS = 0.\n")
+  }
+  #Any nodes whose ESS = 0 should be examined before deciding to delete them. If these nodes are fixed or not at all useful in the model, they can be deleted....If not, understand and adjust!!!!
+  # Step 2: Remove nodes with ESS = 0
+  ess_values_cleaned <- ess_values_cleaned[ess_values_cleaned != 0]
+  
+  cat("\nNodes with ESS = 0 have been removed.\n")
+  cat("Updated ESS values:\n")
+  print(ess_values_cleaned)
+  
+} else {
+  cat("The variable `ess_values_filtered` does not exist.\n")
+}
+
+```
+# Relationship between Rhat and ESS (This relationship will already give some idea of the expected bottlenecks)
+```{r Relationship between Rhat & ESS,fig.cap="", out.width="90%",echo=FALSE}
+
+sampler_nodes <- unique(unlist(lapply(samplers, function(sampler) sampler$target)))
+
+cat("Number of nodes extracted from samplers :", length(sampler_nodes), "\n")
+cat("Overview of extracted nodes :\n")
+print(head(sampler_nodes))
+
+# Filter nodes according to `sampler_nodes`.
+if (!exists("sampler_nodes") || !exists("mcmc_list")) {
+  stop("The 'sampler_nodes' or 'mcmc_list' objects cannot be found.")
+}
+
+filtered_mcmc <- lapply(mcmc_list, function(chain) {
+  chain[, colnames(chain) %in% sampler_nodes]
+})
+
+# Checking filtered data
+if (length(filtered_mcmc) == 0 || is.null(filtered_mcmc[[1]])) {
+  stop("No filtered data available in 'filtered_mcmc'.")
+}
+
+# Convert to mcmc.list object
+filtered_mcmc_list <- mcmc.list(lapply(filtered_mcmc, as.mcmc))
+
+# Calculate Rhat (Gelman diagnosis)
+rhat_results <- gelman.diag(filtered_mcmc_list, multivariate = FALSE)
+
+# Calculate Effective Sample Size (ESS)
+ess_results <- effectiveSize(filtered_mcmc_list)
+
+# Show results
+print(rhat_results)
+print(ess_results)
+
+# ----------------------------------------------------------------------------
+# Extract family names and summarize ESS and Rhat by family -----------
+# Extract surnames by removing indices
+family_names <- sub("\\[.*\\]", "", colnames(filtered_mcmc[[1]]))
+
+# Create a combined table of ESS and Rhat results
+combined_data <- data.frame(
+  Node = colnames(filtered_mcmc[[1]]),
+  Family = family_names,
+  ESS = as.vector(ess_results),
+  Rhat = as.vector(rhat_results$psrf[, 1])  # First column for univariate Rhat
+)
+
+# Aggregate SSE and Rhat by family
+aggregated_data <- combined_data %>%
+  group_by(Family) %>%
+  summarise(
+    MedianESS = median(ESS, na.rm = TRUE),
+    MedianRhat = median(Rhat, na.rm = TRUE),
+    FamilySize = n()
+  )
+
+cat("Aggregated data by family:\n")
+print(aggregated_data)
+
+# ----------------------------------------------------------------------------
+# Rhat vs ESS visualization by family --------------------------------------
+
+rhat_ess_plot <- ggplot(aggregated_data, aes(x = MedianESS, y = MedianRhat)) +
+  geom_point(size = 3, alpha = 0.7, color = "blue") +
+  geom_text_repel(aes(label = Family), size = 3, max.overlaps = 10) +
+  labs(
+    title = "Rhat vs ESS by node family",
+    x = "Sample size effective median (ESS)",
+    y = "Rhat médian"
+  ) +
+  theme_minimal()
+
+print(rhat_ess_plot)
+
+# Save graphic
+#ggsave("rhat_vs_ess_plot.png", plot = rhat_ess_plot, width = 10, height = 6)
+
+#### Special section
+##Functions
+f.density.bivar <- function(x,y, nlevels,nb.points)
+{
+
+indice <- which(x<=quantile(x, prob = 0.995))
+x <- x[indice]
+y <- y[indice]
+
+xrange <- range(x) ; nbreaks.x=100
+yrange <- range(y) ; nbreaks.y=100
+
+xhist <- hist(x, breaks=seq(xrange[1],xrange[2],length.out=nbreaks.x), plot=FALSE)
+yhist <- hist(y, breaks=seq(yrange[1],yrange[2],length.out=nbreaks.y), plot=FALSE)
+
+nf <- layout(matrix(c(2,0,1,3),2,2,byrow=TRUE), c(3,1), c(1,3), TRUE)
+layout.show(nf)
+
+par(mar=c(5,5,1,1))
+plot(x[1:nb.points], y[1:nb.points], xlim=xrange, ylim=yrange, 
+	xlab="", ylab="", pch=".", cex.lab = 1.5)
+dens2d <- kde2d(x=x, y=y, n = 100)
+contour(dens2d , nlevels = nlevels, drawlabels=F, col = "red", lw = 2, add = T) 
+mtext(text=expression(par1), side=1, line=3, cex=1.3)
+mtext(text=expression(par2), side=2, line=3, cex=1.3)
+
+par(mar=c(0,5,3,1))
+barplot(xhist$density, axes=FALSE, space=0, horiz=FALSE, col = "lightblue")
+mtext(text=expression(paste("Marginal pdf for ",par1)), side=3, line=1, cex=1.3)
+
+par(mar=c(5,0,1,3))
+barplot(yhist$density, axes=FALSE, space=0, horiz=TRUE, col = "lightblue")
+mtext(text=expression(paste("Marginal pdf for ",par2)), side=4, line = 1, las = 0, cex=1.3)
+}
+f.nimble.square  <- nimbleFunction(    
+  run = function(x = double(0)) {
+    
+    declare(square,double(0))
+    
+    square <- x*x
+    
+    returnType(double(0))
+    return(square)
+  }
+)
+panel.dens <- function(x, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(usr[1:2], 0, 1.5) )
+    h <- density(x,adjust=1)
+    h$y<-h$y/max(h$y)
+    xlim=range(h$x)
+    lines(h, col="black", ...)
+}
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- (cor(x, y))
+    txt <- format(c(r, 0.123456789), digits=digits)[1]
+    txt <- paste(prefix, txt, sep="")
+    if(missing(cex.cor)) cex <- 0.8/strwidth(txt)
+    cex=2
+    # text(0.5, 0.5, txt, cex = cex * r)
+	text(0.5, 0.5, txt, cex = cex)
+}
+
+# Alpha vs. k visualization with correlation -----------------------------------
+#Data mcmc
+# Assurez-vous que vos échantillons MCMC sont disponibles sous forme de table
+mcmc.table <- as.data.frame(as.matrix(filtered_mcmc_list))
+head(mcmc.table)
+
+# Extraction des colonnes pour alpha et k
+alpha <- as.vector(mcmc.table$'alpha')
+k <- as.vector(mcmc.table$'k')
+#Densités Marginales de alpha et k
+# Paramétrage graphique pour afficher deux graphiques empilés
+par(mfrow = c(2, 1), mar = c(4, 4, 2, 1))
+
+# Densité pour alpha
+plot(density(alpha), 
+     xlab = "alpha", ylab = "Density", 
+     main = "Posterior Density of alpha", 
+     col = "red", lwd = 2)
+
+# Densité pour k
+plot(density(k), 
+     xlab = "k", ylab = "Density", 
+     main = "Posterior Density of k", 
+     col = "blue", lwd = 2)
+
+# Réinitialiser les paramètres graphiques
+par(mfrow = c(1, 1))
+##Scatter Plot Joint avec k et alpha
+# Scatter plot joint avec ajout de régression linéaire
+plot(k, alpha, 
+     xlab = "k", ylab = "alpha", 
+     main = "Joint Posterior Distribution of alpha and k",
+     col = rgb(0, 0, 1, 0.5), pch = 16)
+
+abline(lm(alpha ~ k), col = "red", lwd = 2)  # Régression linéaire
+## Matrice de paires pour alpha et k
+pairs(cbind(alpha, k),
+      labels = c("alpha", "k"), 
+      lower.panel = panel.smooth,
+      diag.panel = panel.dens, 
+      upper.panel = panel.cor,
+      cex.labels = 1.5, font.labels = 2)
+#Contours de Densité Jointe (2D)
+# Visualisation avec des contours de densité
+library(MASS)  # Pour kde2d
+
+# Calcul des densités jointes
+kde <- kde2d(k, alpha, n = 200)
+
+# Contour plot
+contour(kde, 
+        xlab = "k", ylab = "alpha", 
+        main = "Contour Plot of Joint Density")
+points(k, alpha, pch = 16, col = rgb(0, 0, 1, 0.5))
+#Visualisation de la Régression avec l'Incertitude
+# Visualisation de plusieurs lignes de régression
+plot(k, alpha, 
+     xlab = "k", ylab = "alpha", 
+     main = "Uncertainty in Regression Lines",
+     col = "blue", pch = 16, cex = 0.6)
+
+# Superposer plusieurs régressions à partir des échantillons
+nb.lines <- 100
+for (i in 1:nb.lines) {
+  abline(a = alpha[i], b = k[i], col = rgb(0.7, 0.7, 0.7, 0.2), lwd = 0.5)
+}
+
+# Ligne médiane
+abline(median(alpha), median(k), col = "red", lwd = 2)
+##Graph zommés
+library(MASS)  # Pour kde2d
+library(ggplot2)
+
+# Préparation des données zoomées
+data_zoom <- data.frame(k = k, alpha = alpha)
+data_zoom <- subset(data_zoom, k <= 130000 & alpha <= 0.05)  # Filtrer les limites
+
+# Calcul des densités jointes dans la zone zoomée
+kde_zoom <- kde2d(data_zoom$k, data_zoom$alpha, n = 200)
+
+# Création du graphique ggplot avec la densité lissée
+ggplot(data_zoom, aes(x = k, y = alpha)) +
+  geom_point(color = "blue", size = 0.5, alpha = 0.6) +  # Points bleus
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.3) +  # Contours lissés
+  scale_fill_viridis_c() +  # Palette de couleurs pour les densités
+  xlim(0.05, 130000) + ylim(0, 0.05) +  # Limites de zoom
+  labs(
+    title = "Zoomed Scatter Plot with Density Contours",
+    x = "k (zoomed)", 
+    y = "alpha (zoomed)"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+#Criteria calculation (computational efficiency ;Algorithmic efficiency)& Identification of bottelenecks associated with these 2 criteria -------------------------------------
+```{r 02 Criteria calculation,fig.cap="", out.width="90%",echo=FALSE}
+
+# Step 1: Calculate minimum Effective Sample Size (ESS) ---------------------
+# Extract the minimum ESS across all parameters and chains, ignoring NA values
+eff_min <- min(ess_values_cleaned, na.rm = TRUE) # Always to check the presence or absence of anomalies
+
+# Step 2: Compute total MCMC time -------------------------------------------
+# Convert total MCMC runtime to seconds
+total_time <- as.numeric(time_mcmc)  # Ensure `time_mcmc` is in seconds
+
+# Step 3: Calculate efficiencies --------------------------------------------
+# Algorithmic efficiency is defined as ESS per iteration (Total number of posterior samples ie the number of iterations actually used for inference)
+Algorithmic_efficiency <- ess_values_cleaned / N
+
+# Computational efficiency is defined as the ratio of ESS threshold to runtime per node
+Computational_efficiency <- (ESS_threshold * sampler_times) / ess_values_cleaned  #index calculated from the update time in each node
+Computational_efficiency_tot <- (ESS_threshold * total_time) / ess_values_cleaned #index calculated from total time
+# Step 4: Identify bottleneck nodes -----------------------------------------
+# Sort nodes by Algorithmic Efficiency in descending order (worst nodes first)
+bottleneck_nodes_by_Algorithmic_efficiency <- order(Algorithmic_efficiency, decreasing = TRUE, na.last = NA)
+
+# Sort nodes by Computational Efficiency in ascending order (worst nodes first)
+bottleneck_nodes_by_Computational_efficiency <- order(Computational_efficiency, decreasing = FALSE, na.last = NA)
+bottleneck_nodes_by_Computational_efficiency_tot <- order(Computational_efficiency_tot, decreasing = FALSE, na.last = NA)
+# Step 5: Extract parameter names -------------------------------------------
+# Get all unique parameter names from `ess_values_filtered`
+all_param_names <- unique(names(ess_values_filtered))
+
+# Debugging: Check extracted parameter names
+# Uncomment for debugging purposes:
+# cat("Extracted parameter names:\n")
+# print(head(all_param_names))
+
+# Step 6: Filter valid bottleneck indices -----------------------------------
+# Ensure indices are valid and within the range of parameter names
+valid_bottleneck_nodes_by_Algorithmic_efficiency <- bottleneck_nodes_by_Algorithmic_efficiency[
+  bottleneck_nodes_by_Algorithmic_efficiency <= length(all_param_names)
+]
+
+valid_bottleneck_nodes_by_Computational_efficiency <- bottleneck_nodes_by_Computational_efficiency[
+  bottleneck_nodes_by_Computational_efficiency <= length(all_param_names)
+]
+valid_bottleneck_nodes_by_Computational_efficiency_tot <- bottleneck_nodes_by_Computational_efficiency_tot[
+  bottleneck_nodes_by_Computational_efficiency_tot <= length(all_param_names)
+]
+
+# Extract node names for the bottlenecks
+Algorithmic_efficiency_bottleneck_node_names <- all_param_names[valid_bottleneck_nodes_by_Algorithmic_efficiency]
+Computational_efficiency_bottleneck_node_names <- all_param_names[valid_bottleneck_nodes_by_Computational_efficiency]
+Computational_efficiency_bottleneck_node_names_tot <- all_param_names[valid_bottleneck_nodes_by_Computational_efficiency_tot]
+# Step 7: Identify the worst nodes ------------------------------------------
+# Extract the nodes with the lowest Algorithmic Efficiency (last `prop_worst` nodes)
+worst_algorithmic_efficiency_nodes <- tail(Algorithmic_efficiency_bottleneck_node_names, prop_worst)
+
+# Extract the nodes with the highest Computational Efficiency (first `prop_worst` nodes)
+worst_computational_efficiency_nodes <- head(Computational_efficiency_bottleneck_node_names, prop_worst)
+worst_computational_efficiency_nodes_tot <- head(Computational_efficiency_bottleneck_node_names_tot, prop_worst)
+# Step 8: Report results ----------------------------------------------------
+# Print the worst bottlenecks based on Algorithmic Efficiency
+#cat("Nodes with the lowest Algorithmic Efficiency (worst bottlenecks):\n")
+#print(worst_algorithmic_efficiency_nodes)
+
+# Print the worst bottlenecks based on Computational Efficiency
+#cat("Nodes with the highest Computational Efficiency (best nodes):\n")
+#print(worst_computational_efficiency_nodes)
+# Step 9: Save efficiencies to a file ---------------------------------------
+# Define output file paths
+output_directory <- "~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast"
+algorithmic_efficiency_file <- file.path(output_directory, "Algorithmic_efficiency.rds")
+computational_efficiency_file <- file.path(output_directory, "Computational_efficiency.rds")
+computational_efficiency_tot_file <- file.path(output_directory, "Computational_efficiency_tot.rds")
+# Create output directory if it doesn't exist
+if (!dir.exists(output_directory)) {
+  dir.create(output_directory, recursive = TRUE)
+}
+
+# Save Algorithmic Efficiency to RDS
+saveRDS(Algorithmic_efficiency, file = algorithmic_efficiency_file)
+
+# Save Computational Efficiency to RDS
+saveRDS(Computational_efficiency, file = computational_efficiency_file)
+# Save Computational Efficiency to RDS
+saveRDS(Computational_efficiency_tot, file = computational_efficiency_tot_file)
+
+# Confirmation message
+cat("Efficiencies have been saved to:", output_directory, "\n")
+
+```
+# Graphics for Algorithmic_efficiency & Computational_efficiency
+```{r bottlenecks_graphics,fig.cap="", out.width="90%", ECHO=FALSE}
+# Step 1: Recall data -----------------------------------------------------
+# Step 2: Process combined data for visualization --------------------------
+# Combine data into a data frame
+combined_data <- data.frame(
+  Algorithmic_Efficiency = Algorithmic_efficiency,
+  Computational_Efficiency = Computational_efficiency,
+  Computational_Efficiency_tot = Computational_efficiency_tot,
+  AssociatedNodes = names(Algorithmic_efficiency)
+)
+
+# Extract the node family by removing indices in brackets
+combined_data <- combined_data %>%
+  mutate(Family = sub("\\[.*\\]", "", AssociatedNodes))  # Remove bracketed indices
+
+# Group by family and calculate statistics
+grouped_data <- combined_data %>%
+  group_by(Family) %>%
+  summarise(
+    MedianAlgorithmicEfficiency = median(Algorithmic_Efficiency, na.rm = TRUE),
+    MedianComputationalEfficiency = median(Computational_Efficiency, na.rm = TRUE),
+    MedianComputationalEfficiency_tot = median(Computational_Efficiency_tot, na.rm = TRUE),
+    FamilySize = n()#Display the number of elements per family; this must correspond to the number of indices taken by the node
+  )
+
+# Step 3: Visualize efficiencies -------------------------------------------
+# Plot raw median algorithmic efficiencies by family
+algorithmic_plot_raw <- ggplot(grouped_data, aes(x = reorder(Family, MedianAlgorithmicEfficiency), y = MedianAlgorithmicEfficiency)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Median Algorithmic Efficiency by Node Family",
+    x = "Node Family",
+    y = "Median Algorithmic Efficiency"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Plot raw median computational efficiencies by family
+computational_plot_raw <- ggplot(grouped_data, aes(x = reorder(Family, MedianComputationalEfficiency), y = MedianComputationalEfficiency)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  labs(
+    title = "Median Computational Efficiency by Node Family",
+    x = "Node Family",
+    y = "Median Computational Efficiency"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Plot raw median computational efficiencies with total time by family
+computational_plot_raw_tot <- ggplot(grouped_data, aes(x = reorder(Family, MedianComputationalEfficiency_tot), y = MedianComputationalEfficiency_tot)) +
+  geom_bar(stat = "identity", fill = "green") +
+  labs(
+    title = "Median Computational Efficiency_tot by Node Family",
+    x = "Node Family",
+    y = "Median Computational Efficiency with total time"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# Display the plots
+print(algorithmic_plot_raw)
+print(computational_plot_raw)
+print(computational_plot_raw_tot)
+
+
+# Step 4: Identify the slowest nodes ----------------------------------------
+# Extract nodes with the lowest raw median algorithmic efficiencies
+worst_nodes_raw_algorithmic <- grouped_data %>%
+  arrange(desc(MedianAlgorithmicEfficiency)) %>%
+  slice_min(MedianAlgorithmicEfficiency, n=prop_worst)
+
+# Extract nodes with the highest raw median computational efficiencies
+worst_nodes_raw_computational <- grouped_data %>%
+  arrange(desc(MedianComputationalEfficiency)) %>%
+  slice_max(MedianComputationalEfficiency, n=prop_worst)
+
+# Extract nodes with the highest raw median computational efficiencies
+worst_nodes_raw_computational_tot <- grouped_data %>%
+  arrange(desc(MedianComputationalEfficiency_tot)) %>%
+  slice_max(MedianComputationalEfficiency_tot, n=prop_worst)
+
+# Display the slowest nodes based on raw median times
+cat("Nodes with the lowest raw median algorithmic efficiencies:\n")
+print(worst_nodes_raw_algorithmic)
+
+cat("Nodes with the highest raw median computational efficiencies:\n")
+print(worst_nodes_raw_computational)
+cat("Nodes with the highest raw median computational efficiencies tot:\n")
+print(worst_nodes_raw_computational_tot)
+```
+#Third criterion: Computational time and identification of bottlenecks associated with this criterion & Visualisation -------------------------------------
+```{r Computational time,fig.cap="", out.width="90%",echo=FALSE}
+
+# Step 1: Extract sampler information ---------------------------------------
+# Extract structured information from samplers into a list of data frames
+sampler_info_list <- lapply(samplers, function(sampler) {
+  data.frame(
+    SamplerType = class(sampler),                 # Type of sampler
+    AssociatedNodes = paste(sampler$target),     # Associated nodes (concatenated if multiple)
+    stringsAsFactors = FALSE
+  )
+})
+
+# Combine the list into a single data frame
+sampler_info_df <- do.call(rbind, sampler_info_list)
+
+# Rename columns for clarity
+colnames(sampler_info_df) <- c("SamplerType", "AssociatedNodes")
+
+# Save the sampler information to an RDS file for reference
+saveRDS(sampler_info_df, "sampler_info.rds")
+
+# Step 2: Load sampler times and verify -------------------------------------
+# Load sampler times from an RDS file
+sampler_times <- readRDS("~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/sampler_times_base_model_chain1.rds")
+
+# Ensure the lengths of `sampler_times` and `sampler_info_df` match
+if (length(sampler_times) != nrow(sampler_info_df)) {
+  stop("The number of sampler times does not match the number of rows in `sampler_info_df`.")
+}
+
+# Add sampler times as a new column to the data frame
+sampler_info_df$Time <- sampler_times
+
+
+# Save the combined sampler information to an RDS file
+sampler_info_file <- "~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/combined_sampler_info.rds"
+saveRDS(sampler_info_df, file = sampler_info_file)
+
+# Message confirmation
+cat("Efficiencies and sampler information have been saved to their respective files.\n")
+
+
+# Step 3: Process combined data for visualization ---------------------------
+
+combined_data <- readRDS("~/Optimization_process/Toy_model/Scorff LCM_model2/outputs_hindcast/combined_sampler_info.rds")
+
+# Adjust combined data to include only nodes present in sampler_nodes_filtered
+combined_data <- combined_data %>%
+  filter(AssociatedNodes %in% sampler_nodes_filtered)  # Keep only valid nodes
+
+# Extract the node family by removing indices in brackets
+combined_data <- combined_data %>%
+  mutate(Family = sub("\\[.*\\]", "", AssociatedNodes))  # Remove bracketed indices
+
+# Group by family and calculate statistics
+grouped_data <- combined_data %>%
+  group_by(Family) %>%
+  summarise(
+    MedianTime = median(Time, na.rm = TRUE),          # Median time for each family
+    FamilySize = n()                                 # Size of the family
+  )
+
+# Step 4: Visualize sampler times -------------------------------------------
+# Plot raw median sampler times by family
+time_plot_raw <- ggplot(grouped_data, aes(x = reorder(Family, MedianTime), y = MedianTime)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Median Sampler Times by Node Family",
+    x = "Node Family",
+    y = "Median Time (seconds)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Display the plots
+print(time_plot_raw)
+
+# Step 5: Identify the slowest nodes ----------------------------------------
+
+# Extract nodes with the highest raw median times
+slowest_nodes_raw <- grouped_data %>%
+  filter(!is.na(MedianTime)) %>%       # Exclude any NA values in MedianTime
+  arrange(desc(MedianTime)) %>%        # Sort by descending raw median time
+  slice_max(MedianTime, n = 5)         # Extract the top 5 slowest nodes (adjust n as needed)
+
+# Display the slowest nodes based on raw median times
+cat("Nodes with the highest raw median sampler times (slowest nodes):\n")
+print(slowest_nodes_raw)
+```
+
